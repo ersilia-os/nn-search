@@ -34,7 +34,7 @@ This project provides a **vector database storage and retrieval tool for SMILES 
 ### How to use it
 
 
-# NNS CLI
+# CLI
 
 A command-line interface for managing vector databases, filtering data, and controlling the engine.
 
