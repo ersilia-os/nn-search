@@ -41,9 +41,9 @@ A command-line interface for managing vector databases, filtering data, and cont
 ## Installation
 First install uv, a lightening speed project manager as below:
 ```bash
-
-```
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 ```bash
 uv pip install -e .
 ```
