@@ -39,9 +39,13 @@ This project provides a **vector database storage and retrieval tool for SMILES 
 A command-line interface for managing vector databases, filtering data, and controlling the engine.
 
 ## Installation
-
+First install uv, a lightening speed project manager as below:
 ```bash
-pip install -e .
+
+```
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```bash
+uv pip install -e .
 ```
 
 ## Usage
