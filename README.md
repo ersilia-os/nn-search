@@ -48,21 +48,21 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv pip install -e .
 ```
 
-## Usage
-
-Run the CLI with:
+## SImple example workflow
 
 ```bash
-python -m nns.cli <command> [options]
+# 1. Start the milvus engine. If the image is not in the system, it will be pulled.
+nns engine --start
+
+# 2. Build database
+nns build -c eos3b5e
+
+# 3. Filter data / Note that the data csv file is simply a list of smiles
+nns filter -i data.csv -o data.json -c eos3b5e -k 10
+
+# 4. Check status of the collection
+nns status
 ```
-
-Or if installed:
-
-```bash
-nns <command> [options]
-```
-
----
 
 ## Commands
 
@@ -136,19 +136,3 @@ nns build -c eos5axz/eos3b5e
 * `-c, --collection-name` (required)
 
 ---
-
-## SImple example workflow
-
-```bash
-# 1. Start the milvus engine. If the image is not in the system, it will be pulled.
-nns engine --start
-
-# 2. Build database
-nns build -c eos3b5e
-
-# 3. Filter data / Note that the data csv file is simply a list of smiles
-nns filter -i data.csv -o data.json -c eos3b5e -k 10
-
-# 4. Check status of the collection
-nns status
-```
