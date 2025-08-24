@@ -1,6 +1,4 @@
-import sys
-import time
-import uuid
+import sys, time, uuid
 from pathlib import Path
 
 from nns.fetch.utils import ApiClient, JobStatus, fetch_schema_from_github
