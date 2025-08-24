@@ -52,16 +52,16 @@ uv pip install -e .
 
 ```bash
 # 1. Start the milvus engine. If the image is not in the system, it will be pulled.
-nns engine --start
+uv run nns engine --start
 
 # 2. Build database
-nns build -c eos3b5e
+uv run nns build -c eos3b5e
 
 # 3. Filter data / Note that the data csv file is simply a list of smiles
-nns filter -i data.csv -o data.json -c eos3b5e -k 10
+uv run nns filter -i data.csv -o data.json -c eos3b5e -k 10
 
 # 4. Check status of the collection
-nns status
+uv run nns status
 ```
 
 ## Commands
