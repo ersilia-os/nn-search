@@ -1,39 +1,30 @@
 import sys, time, uuid
-from pathlib import Path
 
-from nns.fetch.utils import ApiClient, JobStatus, fetch_schema_from_github
+from nns.fetch.utils import ApiClient, JobStatus
+from nns.utils.helpers import fetch_schema_from_github
 from nns.utils.vars import API_BASE
 from nns.utils.logging import logger
 from nns.fetch.dump import DumpLocalCache
 
 
 class FetchCloudCache:
-  def __init__(self, model_id: str, output: str = None):
+  def __init__(self, model_id: str, fetch_lcoal: bool = False, file_name: str = None):
     super().__init__()
     self.model_id = model_id
+    self.fetch_lcoal = fetch_lcoal
+    self.file_name = file_name
     self.request_id = None
-    self.dump_local = DumpLocalCache()
     self.fetch_type = "all"
     self.schema = fetch_schema_from_github(self.model_id)
     assert self.schema is not None, "Model schema can not be fetched from github."
     self.cols = self.schema[0]
     self.dtype = self.schema[1]
     self.header = ["key", "input"] + self.cols
-    self.output_path = Path(output) if output else Path(f"{model_id}_precalc.csv")
     self.api = ApiClient()
 
-  def build_vector_db(self) -> str:
+  def build_vector_db(self) -> None:
     shards = self._submit_and_get_shards()
-    outpath = self._merge_shards(shards, None)
-    print(outpath)
-
-  def _handle_strict_local(self) -> str:
-    self.dump_local.init_redis()
-    results, inputs = self.dump_local.fetch_all_cached(
-      self.model_id, self.dtype, cols=self.cols
-    )
-    sys.exit(1)
-    return str(self.output_path)
+    self._merge_shards(shards, None)
 
   def _submit_and_get_shards(self) -> list:
     self.request_id = str(uuid.uuid4())
@@ -44,7 +35,7 @@ class FetchCloudCache:
       "requestid": self.request_id,
       "modelid": self.model_id,
       "fetchtype": self.fetch_type,
-      "nsamples": 1000,
+      "nsamples": 10000,
       "dim": len(self.cols),
     }
     job_id = self.api.post_json(f"{API_BASE}/submit", json=payload)["jobId"]
@@ -53,9 +44,7 @@ class FetchCloudCache:
 
     start = time.time()
     while True:
-      status = self.api.get_json(f"{API_BASE}/status", params={"jobId": job_id})[
-        "status"
-      ]
+      status = self.api.get_json(f"{API_BASE}/status", params={"jobId": job_id})["status"]
 
       logger.info(f"Job status: {status}")
 
@@ -84,10 +73,9 @@ class FetchCloudCache:
 
     return shards
 
-  def _merge_shards(self, shards: list, inputs: list) -> str:
-    self.api.merge_shards(shards, inputs, self.api, self.model_id)
+  def _merge_shards(self, shards: list) -> None:
+    self.api.merge_shards(shards, self.api, self.model_id)
 
-    logger.info(f"Shards merged and saved to {self.output_path}")
+    logger.info(f"[green]Database has been successfully built for {self.model_id}![/]")
 
     sys.exit(1)
-    return str(self.output_path)

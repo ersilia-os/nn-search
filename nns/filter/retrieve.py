@@ -65,9 +65,7 @@ def ann_from_csv_to_json(
   coll.load()
 
   fields = {f.name for f in coll.schema.fields}
-  val_field = (
-    "values" if "values" in fields else ("value" if "value" in fields else None)
-  )
+  val_field = "values" if "values" in fields else ("value" if "value" in fields else None)
   out_fields = ["id", "smiles"] + ([val_field] if val_field else [])
 
   smiles = []

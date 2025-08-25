@@ -11,13 +11,13 @@ def start():
 def stop():
   subprocess.run(["bash", path, "stop"])
 
+
 def restart():
   subprocess.run(["bash", path, "restart"])
 
 
 def upgrade():
   subprocess.run(["bash", path, "upgrade"])
-
 
 
 def delete():

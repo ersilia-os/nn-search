@@ -3,6 +3,7 @@ import rich_click.rich_click as rc
 import os
 from nns.utils.helpers import summerize_status
 from nns.fetch.fetch import FetchCloudCache
+from nns.fetch.dump import DumpLocalCache
 from nns.serve.engine import start as start_engine
 from nns.serve.engine import restart as restart_engine
 from nns.serve.engine import stop as stop_engine
@@ -50,10 +51,8 @@ def cli():
 @cli.command()
 @click.option("--input-file", "-i", required=True, help="Path to the input file.")
 @click.option("--output-file", "-o", required=True, help="Path to the output file.")
-@click.option(
-  "--collection-name", "-c", required=True, help="Collection name of the vector db"
-)
-@click.option("--topk", "-k", required=False, default=5, type=int, help="Top k results")
+@click.option("--collection-name", "-c", required=True, help="Collection name of the vector db")
+@click.option("--topk", "-k", required=False, default=1, type=int, help="Top k results")
 def filter(input_file, output_file, collection_name, topk):
   ann_from_csv_to_json(
     input_csv=input_file, output_path=output_file, collection=collection_name, topk=topk
@@ -70,13 +69,13 @@ def engine(start, restart, stop, upgrade, delete):
   if start:
     start_engine()
   if restart:
-    restart()
+    restart_engine()
   if stop:
     stop_engine()
   if upgrade:
     upgrade_engine()
   if delete:
-    delete()
+    delete_engine()
 
 
 @cli.command()
@@ -86,9 +85,7 @@ def engine(start, restart, stop, upgrade, delete):
   show_default=True,
   help="Milvus URI (e.g., http://localhost:19530)",
 )
-@click.option(
-  "--alias", default="default", show_default=True, help="Milvus connection alias"
-)
+@click.option("--alias", default="default", show_default=True, help="Milvus connection alias")
 @click.option("--token", default=None, help="Auth token, e.g. 'root:Milvus'")
 @click.option(
   "--timeout",
@@ -108,11 +105,26 @@ def status(milvus_uri, alias, token, timeout, show_indexes):
 
 
 @cli.command()
+@click.option("--collection-name", "-c", required=True, help="Collection name of the vector db")
 @click.option(
-  "--collection-name", "-c", required=True, help="Collection name of the vector db"
+  "--local",
+  "-l",
+  help="The local will be fetching the caches from the redis container!",
+  is_flag=True,
+  default=False,
 )
-def build(collection_name):
-  fcc = FetchCloudCache(collection_name)
+@click.option(
+  "--file",
+  "-f",
+  required=False,
+  default=None,
+  help="Path to the result file that you want to create the vector db for.",
+)
+def build(collection_name, local, file):
+  if file:
+    DumpLocalCache(file, collection_name).dump_from_file()
+    return
+  fcc = FetchCloudCache(collection_name, local, file)
   fcc.build_vector_db()
 
 

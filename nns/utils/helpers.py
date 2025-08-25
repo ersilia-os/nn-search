@@ -1,13 +1,10 @@
-import socket, time
+import csv, os, requests, socket, time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from nns.utils.vars import GITHUB_CONTENT_URL, PREDEFINED_COLUMN_FILE
+from nns.utils.logging import logger
 
-from pymilvus import (
-  connections,
-  utility,
-  Collection,
-  DataType,
-)
+from pymilvus import connections, utility, FieldSchema, CollectionSchema, DataType, Collection
 from pymilvus.exceptions import MilvusException
 
 from rich.console import Console
@@ -17,24 +14,112 @@ from rich import box
 from rich.text import Text
 from rich.padding import Padding
 from rich.progress import Progress
+from typing import Optional
+import numpy as np
+from rdkit import Chem, DataStructs
+from rdkit.Chem import AllChem
+from io import StringIO
 
-import rich_click as click
-import rich_click.rich_click as rc
-
-click.rich_click.USE_RICH_MARKUP = True
-click.rich_click.SHOW_ARGUMENTS = True
-
-rc.USE_RICH_MARKUP = True
-rc.SHOW_ARGUMENTS = True
-rc.COLOR_SYSTEM = "truecolor"
-rc.STYLE_OPTION = "bold magenta"
-rc.STYLE_COMMAND = "bold green"
-rc.STYLE_METAVAR = "italic yellow"
-rc.STYLE_SWITCH = "underline cyan"
-rc.STYLE_USAGE = "bold blue"
-rc.STYLE_OPTION_DEFAULT = "dim italic"
 
 console = Console()
+
+
+def fetch_schema_from_github(model_id):
+  st = time.perf_counter()
+  try:
+    response = requests.get(f"{GITHUB_CONTENT_URL}/{model_id}/main/{PREDEFINED_COLUMN_FILE}")
+  except requests.RequestException:
+    logger.warning("Couldn't fetch column name from github!")
+    return None
+
+  csv_data = StringIO(response.text)
+  reader = csv.DictReader(csv_data)
+
+  if "name" not in reader.fieldnames:
+    logger.warning("Couldn't fetch column name from github. Column name not found.")
+    return None
+
+  if "type" not in reader.fieldnames:
+    logger.warning("Couldn't fetch data type from github. Column name not found.")
+    return None
+
+  rows = list(reader)
+  col_name = [row["name"] for row in rows if row["name"]]
+  col_dtype = [row["type"] for row in rows if row["type"]]
+  shape = len(col_dtype)
+  if len(col_name) == 0 and len(col_dtype) == 0:
+    return None
+  et = time.perf_counter()
+  logger.info(f"Column metadata fetched in {et - st:.2} seconds!")
+  return col_name, col_dtype, shape
+
+
+def resolve_dtype(dtype):
+  unique_dtypes = list(set(dtype))
+  dtype = "float" if "float" in unique_dtypes else unique_dtypes[0]
+  if dtype == "integer":
+    return int
+  if dtype == "float":
+    return float
+  return str
+
+
+def morgan_bytes(smiles: str, bits: int = 1024, radius: int = 2) -> Optional[bytes]:
+  mol = Chem.MolFromSmiles(smiles)
+  if mol is None:
+    return None
+  bv = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=bits)
+  arr = np.zeros((bits,), dtype=np.uint8)
+  DataStructs.ConvertToNumpyArray(bv, arr)
+  return np.packbits(arr, bitorder="big").tobytes()
+
+
+def ensure_collection(
+  name: str,
+  fp_bits: int,
+  alias: str = "default",
+  milvus_uri: str = os.getenv("MILVUS_URI", "http://localhost:19530"),
+  token: Optional[str] = None,
+) -> Collection:
+  try:
+    connections.disconnect(alias=alias)
+  except Exception:
+    pass
+  connections.connect(alias=alias, uri=milvus_uri, token=token)
+  if not utility.has_collection(name):
+    schema = CollectionSchema([
+      FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+      FieldSchema(name="smiles", dtype=DataType.VARCHAR, max_length=512),
+      FieldSchema(
+        name="values",
+        dtype=DataType.ARRAY,
+        element_type=DataType.FLOAT,
+        max_capacity=2048,
+      ),
+      FieldSchema(name="fp", dtype=DataType.BINARY_VECTOR, dim=fp_bits),
+    ])
+
+    coll = Collection(name=name, schema=schema)
+  else:
+    coll = Collection(name)
+  return coll
+
+
+def ensure_index_loaded(coll: Collection, metric: str = "JACCARD"):
+  try:
+    has = any(getattr(ix, "field_name", "") == "fp" for ix in getattr(coll, "indexes", []))
+  except Exception:
+    has = False
+  if not has:
+    coll.create_index(
+      field_name="fp",
+      index_params={
+        "index_type": "BIN_IVF_FLAT",
+        "metric_type": metric,
+        "params": {"nlist": 1024},
+      },
+    )
+  coll.load()
 
 
 def parse_host_port(uri: str) -> Tuple[str, int]:
@@ -157,9 +242,7 @@ def describe_collection_pretty(name: str) -> Dict:
   return info
 
 
-def connect_milvus(
-  alias: str, uri: str, token: Optional[str] = None
-) -> Tuple[bool, Optional[str]]:
+def connect_milvus(alias: str, uri: str, token: Optional[str] = None) -> Tuple[bool, Optional[str]]:
   try:
     try:
       connections.disconnect(alias=alias)
@@ -171,28 +254,6 @@ def connect_milvus(
   except Exception as e:
     return False, str(e)
 
-
-def common_options(func):
-  options = [
-    click.option("--input-file", "-i", required=True, help="Path to the input file."),
-    click.option(
-      "--model-dir",
-      "-m",
-      required=False,
-      default=None,
-      help="Directory where the model is stored.",
-    ),
-    click.option("--anonymize", is_flag=True, help="Whether to anonymize outputs."),
-  ]
-  for option in reversed(options):
-    func = option(func)
-  return func
-
-
-from typing import List, Dict, Optional
-from rich.table import Table
-from rich import box
-from rich.panel import Panel
 
 _TYPE_ABBR = {
   "INT64": "I64",
@@ -234,9 +295,7 @@ def _fields_inline(fields: List[Dict], max_items: int = 3) -> str:
 def _indexes_inline(indexes: List[Dict], max_items: int = 2) -> str:
   pairs = []
   for idx in indexes:
-    pairs.append(
-      f"{idx.get('field', '?')}:{_abbr_index_type(idx.get('index_type', '?'))}"
-    )
+    pairs.append(f"{idx.get('field', '?')}:{_abbr_index_type(idx.get('index_type', '?'))}")
     if len(pairs) >= max_items:
       break
   tail = " …" if len(indexes) > max_items else ""
@@ -268,9 +327,7 @@ def build_ultracompact_collections_table(
     max_width=500,
     overflow="ellipsis",
   )
-  tbl.add_column(
-    "Ent.", justify="right", no_wrap=True, max_width=8, overflow="ellipsis"
-  )
+  tbl.add_column("Ent.", justify="right", no_wrap=True, max_width=8, overflow="ellipsis")
   tbl.add_column("Sz", justify="right", no_wrap=True, max_width=8, overflow="ellipsis")
   fields_max = max(10, int(width * (0.42 if show_indexes else 0.6)))
   tbl.add_column("Fields", no_wrap=False, max_width=30, overflow="ellipsis")
@@ -309,6 +366,16 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
     "BINARY_VECTOR": "BV",
   }
 
+  SCALAR_BYTE_SIZE = {
+    "INT64": 8,
+    "INT32": 4,
+    "INT16": 2,
+    "INT8": 1,
+    "DOUBLE": 8,
+    "FLOAT": 4,
+    "BOOL": 1,
+  }
+
   def _abbr_type(t: str) -> str:
     return _TYPE_ABBR.get(t, t.replace("DataType.", ""))
 
@@ -320,9 +387,7 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
     for f in fields:
       t = _abbr_type(str(f.get("type", "")))
       d = f.get("dim")
-      pairs.append(
-        f"{f.get('name', '?')}:{t}({d})" if d else f"{f.get('name', '?')}:{t}"
-      )
+      pairs.append(f"{f.get('name', '?')}:{t}({d})" if d else f"{f.get('name', '?')}:{t}")
       if len(pairs) >= max_items:
         break
     tail = " …" if len(fields) > max_items else ""
@@ -331,32 +396,75 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
   def _indexes_inline(indexes: List[Dict], max_items: int = 2) -> str:
     pairs = []
     for idx in indexes:
-      pairs.append(
-        f"{idx.get('field', '?')}:{_abbr_index_type(idx.get('index_type', '?'))}"
-      )
+      pairs.append(f"{idx.get('field', '?')}:{_abbr_index_type(idx.get('index_type', '?'))}")
       if len(pairs) >= max_items:
         break
     tail = " …" if len(indexes) > max_items else ""
     return (", ".join(pairs) + tail) if pairs else "-"
+
+  def _resolve_bytes(info: Dict) -> float:
+    candidate_keys = [
+      "est_size_bytes",
+      "size_bytes",
+      "estimated_bytes",
+      "bytes",
+      "disk_bytes",
+      "storage_bytes",
+    ]
+    for k in candidate_keys:
+      v = info.get(k)
+      try:
+        if v is not None and float(v) > 0:
+          return float(v)
+      except Exception:
+        pass
+
+    entities = int(info.get("entities", 0)) if info.get("entities") is not None else 0
+    fields = info.get("fields", []) or []
+
+    if entities <= 0 or not fields:
+      return 0.0
+
+    per_row = 0.0
+    for f in fields:
+      t = str(f.get("type", "")).replace("DataType.", "")
+      if t == "FLOAT_VECTOR":
+        dim = int(f.get("dim") or 0)
+        per_row += dim * 4
+      elif t == "BINARY_VECTOR":
+        dim = int(f.get("dim") or 0)
+        per_row += max(0, dim // 8)
+      elif t == "VARCHAR":
+        per_row += 20
+      else:
+        per_row += SCALAR_BYTE_SIZE.get(t, 0)
+
+    per_row += 8
+    est = per_row * entities
+    return float(est)
 
   def _compact_engine_panel(*, title="Engine", width=60, data=None):
     tbl = Table(
       title=title,
       box=box.MINIMAL,
       expand=False,
-      show_header=False,
+      show_header=True,
       show_lines=False,
       pad_edge=False,
       padding=(0, 0),
     )
-    tbl.width = max(40, width)
+    tbl.width = 80
     tbl.add_column(
-      "K", style="bold cyan", no_wrap=True, max_width=10, overflow="ellipsis"
+      "Key",
+      style="bold",
+      no_wrap=True,
+      max_width=int(width * 0.35),
+      overflow="ellipsis",
     )
-    tbl.add_column("V", no_wrap=False, overflow="ellipsis")
+    tbl.add_column("Value", no_wrap=False, overflow="ellipsis")
     for k, v in data or []:
       tbl.add_row(k, v)
-    return Panel(tbl, border_style="blue", padding=0, width=tbl.width + 2)
+    return Panel(tbl, border_style="magenta", padding=0, width=tbl.width + 2)
 
   def _compact_collections_panel(
     infos: List[Dict], *, title="Collections", width=60, show_indexes=True
@@ -372,15 +480,9 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
     )
     tbl.width = 80
     name_w = max(8, int(width * 0.28))
-    tbl.add_column(
-      "Name", style="bold", no_wrap=True, max_width=name_w, overflow="ellipsis"
-    )
-    tbl.add_column(
-      "Entry", justify="right", no_wrap=True, max_width=8, overflow="ellipsis"
-    )
-    tbl.add_column(
-      "Sz", justify="right", no_wrap=True, max_width=8, overflow="ellipsis"
-    )
+    tbl.add_column("Name", style="bold", no_wrap=True, max_width=name_w, overflow="ellipsis")
+    tbl.add_column("Entry", justify="right", no_wrap=True, max_width=8, overflow="ellipsis")
+    tbl.add_column("Sz", justify="right", no_wrap=True, max_width=8, overflow="ellipsis")
     fields_w = max(10, int(width * (0.42 if show_indexes else 0.6)))
     tbl.add_column("Flds", no_wrap=False, max_width=fields_w, overflow="ellipsis")
     if show_indexes:
@@ -390,7 +492,8 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
     for info in infos:
       name = str(info.get("name", "?"))
       ents = f"{int(info.get('entities', 0)):,}"
-      size = bytes_human(float(info.get("est_size_bytes", 0)))
+      size_bytes = _resolve_bytes(info)
+      size = bytes_human(size_bytes)
       ftxt = _fields_inline(info.get("fields", []), max_items=3)
       if show_indexes:
         itxt = _indexes_inline(info.get("indexes", []), max_items=2)
@@ -423,8 +526,8 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
       mode = "unknown"
     engine_rows += [
       ("SDK", "[bold green]Yes[/bold green]"),
-      ("Ver", version),
-      ("Mode", mode),
+      ("Ver", str(version)),
+      ("Mode", str(mode)),
     ]
   else:
     engine_rows += [
@@ -432,7 +535,7 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
       ("Err", f"[red]{conn_err}[/red]"),
     ]
 
-  #   console.print(_compact_engine_panel(title="Engine", width=width, data=engine_rows))
+  console.print(_compact_engine_panel(title="Engine", width=width, data=engine_rows))
 
   if not connected:
     console.print(
@@ -443,9 +546,8 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
     )
     return
 
-  coll_names: List[str] = []
   try:
-    coll_names = utility.list_collections()
+    coll_names: List[str] = utility.list_collections()
   except MilvusException as e:
     console.print(
       Panel(
@@ -460,47 +562,17 @@ def summerize_status(milvus_uri, alias, token, timeout, show_indexes, *, width=6
     console.print(Padding("[yellow]No collections found.[/yellow]", (1, 0, 0, 0)))
     return
 
-  infos = []
+  infos: List[Dict] = []
   with Progress(transient=True) as progress:
     task = progress.add_task("[cyan]Fetching metadata...", total=len(coll_names))
     for name in coll_names:
       info = describe_collection_pretty(name)
+      info.setdefault("name", name)
+      info.setdefault("fields", [])
+      info.setdefault("entities", info.get("row_count", 0))
       infos.append(info)
       progress.update(task, advance=1)
 
   console.print(
-    _compact_collections_panel(
-      infos, title="Collections", width=width, show_indexes=show_indexes
-    )
+    _compact_collections_panel(infos, title="Collections", width=width, show_indexes=show_indexes)
   )
-
-
-@click.group()
-def cli():
-  pass
-
-
-@cli.command()
-@common_options
-def filter(input_file, model_dir, anonymize):
-  pass
-
-
-@cli.command()
-@common_options
-@click.option(
-  "--output-dir", "-o", required=False, help="Path to the output model dir."
-)
-@click.option(
-  "--override-dir",
-  required=False,
-  is_flag=True,
-  default=False,
-  help="Path to the output model dir.",
-)
-def build(input_file, model_dir, anonymize, output_dir, override_dir):
-  pass
-
-
-if __name__ == "__main__":
-  cli()
