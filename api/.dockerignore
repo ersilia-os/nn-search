@@ -1,0 +1,13 @@
+.git
+.gitignore
+**/*.log
+**/*.tmp
+**/*.swp
+bin/
+dist/
+build/
+vendor/
+*.local
+*.DS_Store
+node_modules/
+.tmp/
