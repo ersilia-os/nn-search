@@ -4,8 +4,8 @@
 // of this software and associated documentation files (the "Software"), to deal
 // in the Software without restriction, including without limitation the rights
 // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
+// copies of the Software, and to permit persons to do so, subject to the
+// following conditions:
 // The above copyright notice and this permission notice shall be included in
 // all copies or substantial portions of the Software.
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
@@ -45,13 +45,14 @@ func MustConnect(addr string) *API {
 
 func (a *API) Close() { a.client.Close() }
 
+
 func (a *API) EnsureCollection(ctx context.Context, name string) error {
 	has, err := a.client.HasCollection(ctx, name)
 	if err != nil {
 		return err
 	}
 	if has {
-		return a.client.LoadCollection(ctx, name, false)
+		return nil
 	}
 	schema := &entity.Schema{
 		CollectionName: name,
@@ -62,20 +63,27 @@ func (a *API) EnsureCollection(ctx context.Context, name string) error {
 			{Name: "vec", DataType: entity.FieldTypeBinaryVector, TypeParams: map[string]string{"dim": "1024"}},
 		},
 	}
-	if err := a.client.CreateCollection(ctx, schema, entity.DefaultShardNumber); err != nil {
-		return err
-	}
-	idx, _ := entity.NewIndexBinIvfFlat(entity.JACCARD, 1024)
-	if err := a.client.CreateIndex(ctx, name, "vec", idx, false); err != nil {
-		return err
-	}
-	return a.client.LoadCollection(ctx, name, false)
+	return a.client.CreateCollection(ctx, schema, entity.DefaultShardNumber)
 }
 
-func (a *API) Flush(ctx context.Context, coll string) error {
-	return a.client.Flush(ctx, coll, false)
+func (a *API) BuildIndex(ctx context.Context, coll string, nlist int) error {
+	if nlist <= 0 {
+		nlist = 4096
+	}
+	idx, err := entity.NewIndexBinIvfFlat(entity.JACCARD, nlist)
+	if err != nil {
+		return err
+	}
+	if err := a.client.CreateIndex(ctx, coll, "vec", idx, false); err != nil {
+		return err
+	}
+	return a.client.LoadCollection(ctx, coll, false)
 }
 
+func (a *API) Load(ctx context.Context, coll string) error    { return a.client.LoadCollection(ctx, coll, false) }
+func (a *API) Release(ctx context.Context, coll string) error { return a.client.ReleaseCollection(ctx, coll) }
+
+func (a *API) Flush(ctx context.Context, coll string) error { return a.client.Flush(ctx, coll, false) }
 func (a *API) DropCollection(ctx context.Context, coll string) error {
 	return a.client.DropCollection(ctx, coll)
 }
@@ -121,22 +129,22 @@ func (a *API) SearchTop1Bits(ctx context.Context, coll string, queries [][]byte)
 	var scores []float32
 	var matches []string
 	for _, sr := range res {
-			if sr.Err != nil {
-					return nil, nil, nil, sr.Err
-			}
-			smilesCol := sr.Fields.GetColumn("smiles")
-			if smilesCol == nil {
-					return nil, nil, nil, errors.New("missing smiles")
-			}
-			for i := 0; i < sr.ResultCount; i++ {
-					id, _ := sr.IDs.GetAsInt64(i)
-					sm, _ := smilesCol.GetAsString(i)
-					d := sr.Scores[i]           
-					s := float32(1.0) - d      
-					ids = append(ids, id)
-					matches = append(matches, sm)
-					scores = append(scores, s)
-			}
+		if sr.Err != nil {
+			return nil, nil, nil, sr.Err
+		}
+		smilesCol := sr.Fields.GetColumn("smiles")
+		if smilesCol == nil {
+			return nil, nil, nil, errors.New("missing smiles")
+		}
+		for i := 0; i < sr.ResultCount; i++ {
+			id, _ := sr.IDs.GetAsInt64(i)
+			sm, _ := smilesCol.GetAsString(i)
+			d := sr.Scores[i]
+			s := float32(1.0) - d
+			ids = append(ids, id)
+			matches = append(matches, sm)
+			scores = append(scores, s)
+		}
 	}
 	return ids, scores, matches, nil
 }

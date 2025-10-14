@@ -59,9 +59,10 @@ class ApiClient:
     coll = ensure_collection(model_id, fp_bits)
     logger.info("⬇ No reorder list provided; writing to Milvus")
     smiles_batch, value_batch, fp_batch = [], [], []
-    with download_progress(
-      desc="⬇ downloading shards", total_bytes=total_size, transient=True
-    ) as (progress, task):
+    with download_progress(desc="⬇ downloading shards", total_bytes=total_size, transient=True) as (
+      progress,
+      task,
+    ):
       for shard in gz_shards:
         buf = io.BytesIO()
         for chunk in downloader.download_stream(shard["url"]):
