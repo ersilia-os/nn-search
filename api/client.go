@@ -20,11 +20,9 @@ package main
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/binary"
 	"errors"
 	"log"
-
+	"github.com/ersilia-os/nn-search/rdkit" 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 )
@@ -89,11 +87,27 @@ func (a *API) DropCollection(ctx context.Context, coll string) error {
 }
 
 func (a *API) BitsFromSmiles(smiles []string) [][]byte {
-	out := make([][]byte, len(smiles))
-	for i, s := range smiles {
-		out[i] = HashBits1024(s)
+	results := make([][]byte, 0, len(smiles))
+	for _, s := range smiles {
+		m := rdkit.NewMol(s)
+		fp, err := m.Morgan(2, 1024, false, false)
+		m.Delete()
+		if err != nil {
+			continue
+		}
+		results = append(results, fp.Bits)
 	}
-	return out
+	return results
+}
+
+func (a *API) BitsFromSmile(smile string) []byte {
+	m := rdkit.NewMol(smile)
+	fp, err := m.Morgan(2, 1024, false, false)
+	m.Delete()
+	if err != nil {
+		return nil
+	}
+	return fp.Bits
 }
 
 func (a *API) InsertBits(ctx context.Context, coll string, smiles []string, bits [][]byte, doFlush bool) error {
@@ -167,14 +181,4 @@ func (a *API) CollectionRowCount(ctx context.Context, coll string) (int64, error
 		cnt = cnt*10 + int64(c-'0')
 	}
 	return cnt, nil
-}
-
-func HashBits1024(s string) []byte {
-	h := sha1.Sum([]byte(s))
-	out := make([]byte, DimBits/8)
-	for i := 0; i < len(out); i++ {
-		v := binary.BigEndian.Uint16([]byte{h[i%len(h)], h[(i+1)%len(h)]})
-		out[i] = byte(v & 0xFF)
-	}
-	return out
 }

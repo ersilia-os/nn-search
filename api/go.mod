@@ -1,4 +1,4 @@
-module example/api
+module github.com/ersilia-os/nn-search
 
 go 1.25.1
 

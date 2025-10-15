@@ -166,7 +166,7 @@ func main() {
 				continue
 			}
 			smBatch = append(smBatch, line)
-			btBatch = append(btBatch, HashBits1024(line))
+			btBatch = append(btBatch, api.BitsFromSmile(line))
 			if len(smBatch) >= batch {
 				if err := insertBatch(); err != nil {
 					http.Error(w, "insert: "+err.Error(), 500)
