@@ -143,7 +143,7 @@ func main() {
 			if len(smBatch) == 0 {
 				return nil
 			}
-			if err := api.InsertBits(ctx, coll, smBatch, btBatch, false); err != nil {
+			if err := api.InsertBits(ctx, coll, smBatch, btBatch, true); err != nil {
 				return err
 			}
 			total += int64(len(smBatch))
@@ -186,6 +186,11 @@ func main() {
 			http.Error(w, "flush: "+err.Error(), 500)
 			return
 		}
+		if err := api.BuildIndex(ctx, coll, 4096); err != nil {
+			http.Error(w, "build_index: "+err.Error(), 500)
+			return	
+		}
+
 		log.Printf("insert(stream) success collection=%s total_rows=%d total_ms=%d", coll, total, time.Since(start).Milliseconds())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{

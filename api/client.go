@@ -22,7 +22,9 @@ import (
 	"context"
 	"errors"
 	"log"
-	"github.com/ersilia-os/nn-search/rdkit" 
+	"strings"
+
+	"github.com/ersilia-os/nn-search/rdkit"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 )
@@ -43,7 +45,6 @@ func MustConnect(addr string) *API {
 
 func (a *API) Close() { a.client.Close() }
 
-
 func (a *API) EnsureCollection(ctx context.Context, name string) error {
 	has, err := a.client.HasCollection(ctx, name)
 	if err != nil {
@@ -57,7 +58,7 @@ func (a *API) EnsureCollection(ctx context.Context, name string) error {
 		AutoID:         true,
 		Fields: []*entity.Field{
 			{Name: "id", DataType: entity.FieldTypeInt64, AutoID: true, PrimaryKey: true},
-			{Name: "smiles", DataType: entity.FieldTypeVarChar, TypeParams: map[string]string{"max_length": "512"}},
+			{Name: "input", DataType: entity.FieldTypeVarChar, TypeParams: map[string]string{"max_length": "1024"}},
 			{Name: "vec", DataType: entity.FieldTypeBinaryVector, TypeParams: map[string]string{"dim": "1024"}},
 		},
 	}
@@ -65,20 +66,25 @@ func (a *API) EnsureCollection(ctx context.Context, name string) error {
 }
 
 func (a *API) BuildIndex(ctx context.Context, coll string, nlist int) error {
-	if nlist <= 0 {
-		nlist = 4096
-	}
-	idx, err := entity.NewIndexBinIvfFlat(entity.JACCARD, nlist)
-	if err != nil {
-		return err
-	}
-	if err := a.client.CreateIndex(ctx, coll, "vec", idx, false); err != nil {
-		return err
-	}
-	return a.client.LoadCollection(ctx, coll, false)
+    if nlist <= 0 {
+        nlist = 4096
+    }
+    if err := a.client.Flush(ctx, coll, false); err != nil {
+        return err
+    }
+    _ = a.client.ReleaseCollection(ctx, coll)
+
+    idx, err := entity.NewIndexBinIvfFlat(entity.JACCARD, nlist)
+    if err != nil {
+        return err
+    }
+    if err := a.client.CreateIndex(ctx, coll, "vec", idx, true); err != nil {
+        return err
+    }
+    return a.client.LoadCollection(ctx, coll, true)
 }
 
-func (a *API) Load(ctx context.Context, coll string) error    { return a.client.LoadCollection(ctx, coll, false) }
+func (a *API) Load(ctx context.Context, coll string) error    { return a.client.LoadCollection(ctx, coll, true) }
 func (a *API) Release(ctx context.Context, coll string) error { return a.client.ReleaseCollection(ctx, coll) }
 
 func (a *API) Flush(ctx context.Context, coll string) error { return a.client.Flush(ctx, coll, false) }
@@ -86,9 +92,9 @@ func (a *API) DropCollection(ctx context.Context, coll string) error {
 	return a.client.DropCollection(ctx, coll)
 }
 
-func (a *API) BitsFromSmiles(smiles []string) [][]byte {
-	results := make([][]byte, 0, len(smiles))
-	for _, s := range smiles {
+func (a *API) BitsFromSmiles(input []string) [][]byte {
+	results := make([][]byte, 0, len(input))
+	for _, s := range input {
 		m := rdkit.NewMol(s)
 		fp, err := m.Morgan(2, 1024, false, false)
 		m.Delete()
@@ -110,35 +116,67 @@ func (a *API) BitsFromSmile(smile string) []byte {
 	return fp.Bits
 }
 
-func (a *API) InsertBits(ctx context.Context, coll string, smiles []string, bits [][]byte, doFlush bool) error {
-	smCol := entity.NewColumnVarChar("smiles", smiles)
+func (a *API) InsertBits(ctx context.Context, coll string, input []string, bits [][]byte, doFlush bool) error {
+	smCol := entity.NewColumnVarChar("input", input)
 	vecCol := entity.NewColumnBinaryVector("vec", DimBits, bits)
 	if _, err := a.client.Insert(ctx, coll, "", smCol, vecCol); err != nil {
 		return err
 	}
-	log.Printf("insert batch collection=%s rows=%d", coll, len(smiles))
+	log.Printf("insert batch collection=%s rows=%d", coll, len(input))
 	if doFlush {
 		if err := a.client.Flush(ctx, coll, false); err != nil {
 			return err
 		}
-		log.Printf("insert flush collection=%s rows=%d", coll, len(smiles))
+		log.Printf("insert flush collection=%s rows=%d", coll, len(input))
 	}
 	return nil
 }
 
+func (a *API) ensureLoaded(ctx context.Context, coll string) error {
+	return a.client.LoadCollection(ctx, coll, true)
+}
+
 func (a *API) SearchTop1Bits(ctx context.Context, coll string, queries [][]byte) ([]int64, []float32, []string, error) {
+	if err := a.ensureLoaded(ctx, coll); err != nil {
+		return nil, nil, nil, err
+	}
+
 	vecs := make([]entity.Vector, 0, len(queries))
 	for _, q := range queries {
 		vecs = append(vecs, entity.BinaryVector(q))
 	}
-	sp, err := entity.NewIndexBinIvfFlatSearchParam(64)
+
+	var hasIndex bool
+	if idxes, err := a.client.DescribeIndex(ctx, coll, "vec"); err == nil && len(idxes) > 0 {
+		hasIndex = true
+	}
+
+	var sp entity.SearchParam
+	var err error
+	if hasIndex {
+		sp, err = entity.NewIndexBinIvfFlatSearchParam(16) 
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	} else {
+		sp = nil 
+	}
+
+	res, err := a.client.Search(ctx, coll, nil, "", []string{"input"}, vecs, "vec", entity.JACCARD, 1, sp)
+
+	if err != nil && (strings.Contains(err.Error(), "index not found") || strings.Contains(err.Error(), "index not exist")) {
+		if e := a.BuildIndex(ctx, coll, 4096); e == nil {
+			if sp, err = entity.NewIndexBinIvfFlatSearchParam(16); err == nil {
+				res, err = a.client.Search(ctx, coll, nil, "", []string{"input"}, vecs, "vec", entity.JACCARD, 1, sp)
+			}
+		} else {
+			res, err = a.client.Search(ctx, coll, nil, "", []string{"input"}, vecs, "vec", entity.JACCARD, 1, nil)
+		}
+	}
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	res, err := a.client.Search(ctx, coll, nil, "", []string{"smiles"}, vecs, "vec", entity.JACCARD, 1, sp)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+
 	var ids []int64
 	var scores []float32
 	var matches []string
@@ -146,22 +184,25 @@ func (a *API) SearchTop1Bits(ctx context.Context, coll string, queries [][]byte)
 		if sr.Err != nil {
 			return nil, nil, nil, sr.Err
 		}
-		smilesCol := sr.Fields.GetColumn("smiles")
+		smilesCol := sr.Fields.GetColumn("input")
 		if smilesCol == nil {
-			return nil, nil, nil, errors.New("missing smiles")
+			return nil, nil, nil, errors.New("missing input")
 		}
 		for i := 0; i < sr.ResultCount; i++ {
 			id, _ := sr.IDs.GetAsInt64(i)
 			sm, _ := smilesCol.GetAsString(i)
 			d := sr.Scores[i]
 			s := float32(1.0) - d
+
 			ids = append(ids, id)
 			matches = append(matches, sm)
 			scores = append(scores, s)
 		}
 	}
+
 	return ids, scores, matches, nil
 }
+
 
 func (a *API) CollectionRowCount(ctx context.Context, coll string) (int64, error) {
 	stats, err := a.client.GetCollectionStatistics(ctx, coll)

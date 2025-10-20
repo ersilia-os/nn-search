@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ersiliaos/nns
+    image: ersiliaos/nns:v1.0.0
     container_name: nns-api
     depends_on:
       milvus:
